@@ -136,7 +136,9 @@ export default function ContactPage() {
                   <div>
                     <p className="font-medium">WhatsApp</p>
                     <p className="text-sm text-muted-foreground">
-                      The quickest way to reach us — use the button on the left
+                      The quickest way to reach us — use the{" "}
+                      <span className="whitespace-nowrap">&ldquo;Chat with us on WhatsApp&rdquo;</span>{" "}
+                      button
                     </p>
                   </div>
                 </div>
@@ -149,90 +151,64 @@ export default function ContactPage() {
                     </p>
                   </div>
                 </div>
-                <div className="flex items-start gap-3">
-                  <div className="text-2xl">🕒</div>
-                  <div>
-                    <p className="font-medium">Business Hours</p>
-                    <p className="text-sm text-muted-foreground">
-                      Monday - Saturday: 9am - 7pm<br />
-                      Sunday: By appointment only
-                    </p>
+                {hasSocialLinks && (
+                  <div className="flex items-start gap-3">
+                    <div className="text-2xl">✨</div>
+                    <div className="flex-1">
+                      <p className="font-medium">Follow Us</p>
+                      <p className="mb-3 text-sm text-muted-foreground">
+                        Our latest work and beauty tips
+                      </p>
+                      {/* Wraps: up to five links, in a narrower column than the
+                          standalone card these used to live in. */}
+                      <div className="flex flex-wrap gap-2">
+                      {publicSettings.social_instagram && (
+                        <Button variant="outline" size="sm" asChild>
+                          <Link href={publicSettings.social_instagram} target="_blank" rel="noopener noreferrer">
+                            <Instagram className="mr-1.5 h-4 w-4" />
+                            Instagram
+                          </Link>
+                        </Button>
+                      )}
+                      {publicSettings.social_facebook && (
+                        <Button variant="outline" size="sm" asChild>
+                          <Link href={publicSettings.social_facebook} target="_blank" rel="noopener noreferrer">
+                            <Facebook className="mr-1.5 h-4 w-4" />
+                            Facebook
+                          </Link>
+                        </Button>
+                      )}
+                      {publicSettings.social_twitter && (
+                        <Button variant="outline" size="sm" asChild>
+                          <Link href={publicSettings.social_twitter} target="_blank" rel="noopener noreferrer">
+                            <Twitter className="mr-1.5 h-4 w-4" />
+                            Twitter
+                          </Link>
+                        </Button>
+                      )}
+                      {publicSettings.social_tiktok && (
+                        <Button variant="outline" size="sm" asChild>
+                          <Link href={publicSettings.social_tiktok} target="_blank" rel="noopener noreferrer">
+                            TikTok
+                          </Link>
+                        </Button>
+                      )}
+                      {publicSettings.social_youtube && (
+                        <Button variant="outline" size="sm" asChild>
+                          <Link href={publicSettings.social_youtube} target="_blank" rel="noopener noreferrer">
+                            <Youtube className="mr-1.5 h-4 w-4" />
+                            YouTube
+                          </Link>
+                        </Button>
+                      )}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                )}
               </CardContent>
             </Card>
 
-            <Card className="border-secondary/50">
-              <CardHeader>
-                <CardTitle>Booking Information</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm text-muted-foreground">
-                <p>
-                  📅 We recommend booking bridal services at least 3-6 months in advance
-                </p>
-                <p>
-                  💰 Deposits are required to secure your appointment
-                </p>
-                <p>
-                  🎨 Trial sessions are available for all bridal packages
-                </p>
-                <p>
-                  🚗 On-location services available within 50 miles
-                </p>
-              </CardContent>
-            </Card>
 
-            {hasSocialLinks && (
-            <Card className="bg-muted/50">
-              <CardContent className="p-6">
-                <h3 className="mb-2 font-semibold">Follow Us</h3>
-                <p className="mb-4 text-sm text-muted-foreground">
-                  Stay updated with our latest work and beauty tips
-                </p>
-                <div className="flex gap-3">
-                  {publicSettings.social_instagram && (
-                    <Button variant="outline" size="sm" asChild>
-                      <Link href={publicSettings.social_instagram} target="_blank" rel="noopener noreferrer">
-                        <Instagram className="mr-1.5 h-4 w-4" />
-                        Instagram
-                      </Link>
-                    </Button>
-                  )}
-                  {publicSettings.social_facebook && (
-                    <Button variant="outline" size="sm" asChild>
-                      <Link href={publicSettings.social_facebook} target="_blank" rel="noopener noreferrer">
-                        <Facebook className="mr-1.5 h-4 w-4" />
-                        Facebook
-                      </Link>
-                    </Button>
-                  )}
-                  {publicSettings.social_twitter && (
-                    <Button variant="outline" size="sm" asChild>
-                      <Link href={publicSettings.social_twitter} target="_blank" rel="noopener noreferrer">
-                        <Twitter className="mr-1.5 h-4 w-4" />
-                        Twitter
-                      </Link>
-                    </Button>
-                  )}
-                  {publicSettings.social_tiktok && (
-                    <Button variant="outline" size="sm" asChild>
-                      <Link href={publicSettings.social_tiktok} target="_blank" rel="noopener noreferrer">
-                        TikTok
-                      </Link>
-                    </Button>
-                  )}
-                  {publicSettings.social_youtube && (
-                    <Button variant="outline" size="sm" asChild>
-                      <Link href={publicSettings.social_youtube} target="_blank" rel="noopener noreferrer">
-                        <Youtube className="mr-1.5 h-4 w-4" />
-                        YouTube
-                      </Link>
-                    </Button>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-            )}
           </div>
         </div>
       </main>
