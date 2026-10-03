@@ -149,8 +149,8 @@ export default function AboutPage() {
                 <Button asChild size="lg">
                   <Link href="/services">View Services</Link>
                 </Button>
-                <Button asChild variant="outline" size="lg" disabled>
-                  <Link href="/contact">Contact Us (Coming Soon)</Link>
+                <Button asChild variant="outline" size="lg">
+                  <Link href="/contact">Contact Us</Link>
                 </Button>
               </div>
             </CardContent>

@@ -573,7 +573,7 @@ export default function Home({
             ) : (
               <div className="py-12 text-center text-muted-foreground">
                 <ShoppingBag className="mx-auto mb-4 h-12 w-12 opacity-50" />
-                <p>Featured products coming soon</p>
+                <p>No featured products yet</p>
               </div>
             )}
 
@@ -713,7 +713,7 @@ export default function Home({
             ) : (
               <div className="py-12 text-center text-muted-foreground">
                 <Star className="mx-auto mb-4 h-12 w-12 opacity-50" />
-                <p>Client testimonials coming soon</p>
+                <p>No testimonials yet</p>
               </div>
             )}
 
