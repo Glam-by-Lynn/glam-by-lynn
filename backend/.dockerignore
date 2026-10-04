@@ -1,0 +1,43 @@
+# Keep secrets, local state and build noise out of the image.
+#
+# The Dockerfile does `COPY . .`, so without this file the build context
+# includes backend/.env — real credentials — plus a ~149 MB macOS virtualenv
+# that would be useless and actively harmful inside a Linux image. Anyone who
+# can pull the image can read every layer, so a leaked .env is a leaked secret.
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Virtualenvs — wrong platform, and they'd shadow the installed packages
+venv/
+.venv/
+env/
+
+# Python build and cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Test and coverage output
+htmlcov/
+coverage.json
+.coverage
+.coverage.*
+
+# Local uploads: user content belongs in a volume or object storage, not baked
+# into an image that gets rebuilt and redeployed.
+uploads/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Version control
+.git/
+.gitignore

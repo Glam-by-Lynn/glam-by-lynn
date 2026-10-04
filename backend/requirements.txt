@@ -11,6 +11,8 @@ anyio==4.15.1
     #   httpx
     #   starlette
     #   watchfiles
+async-timeout==5.0.1
+    # via redis
 bcrypt==5.0.0
     # via passlib
 black==26.5.1
@@ -167,6 +169,8 @@ pytokens==0.4.1
     # via black
 pyyaml==6.0.3
     # via uvicorn
+redis==8.1.0
+    # via -r requirements.in
 requests==2.34.2
     # via
     #   requests-oauthlib
