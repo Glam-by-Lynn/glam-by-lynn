@@ -64,6 +64,8 @@ faker>=22.5.1
 
 # Observability
 sentry-sdk[fastapi]>=2.0.0
+# Shared rate-limit counters across containers (see core/rate_limit_store.py).
+redis>=5.0.0
 
 # Image validation (magic-byte checks on uploads)
 Pillow>=10.2.0

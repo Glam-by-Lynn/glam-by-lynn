@@ -1,0 +1,104 @@
+# Production stack for a single EC2 instance.
+#
+# Three services: the API, Redis for shared rate-limit counters, and nginx
+# terminating TLS. PostgreSQL is deliberately absent — it lives in RDS, so the
+# database survives the instance being replaced, and backups and patching are
+# AWS's problem rather than yours.
+#
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+#
+# See deploy/README.md for first-run setup, including certificates.
+
+name: glam-by-lynn
+
+services:
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: glam-by-lynn-api:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # One trusted proxy — nginx below. The limiter takes the client IP as the
+      # Nth entry from the right of X-Forwarded-For; getting this wrong either
+      # trusts a value the caller set, or buckets every visitor together.
+      TRUSTED_PROXY_HOPS: "1"
+      REDIS_URL: "redis://redis:6379/0"
+      ENVIRONMENT: "production"
+    volumes:
+      # Only used when STORAGE_PROVIDER=local. Keeps uploads across redeploys —
+      # anything written inside the container is lost when it's replaced.
+      - uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    # No `ports:` on purpose. The API is reachable only through nginx on the
+    # internal network, which is what makes trusting forwarded headers safe.
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health/db"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    logging: &json_logs
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Counters are disposable: losing them on restart costs one window of
+    # limiting, not data. No persistence, and a cap so Redis can never eat the
+    # instance's memory.
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *json_logs
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot-conf:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on:
+      - api
+    logging: *json_logs
+
+  # Renewal runs in the background; nginx picks up new certificates on reload.
+  # The initial certificate is issued manually — see deploy/README.md.
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: >
+      sh -c 'trap exit TERM;
+      while :; do certbot renew --webroot -w /var/www/certbot --quiet;
+      sleep 12h & wait $${!}; done'
+    logging: *json_logs
+
+volumes:
+  uploads:
+  certbot-conf:
+  certbot-www:

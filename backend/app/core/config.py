@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     # to 1.
     TRUSTED_PROXY_HOPS: int = 0
 
+    # Shared store for rate-limit counters. Unset means per-process counters,
+    # which is correct for one container and wrong for several: each would
+    # allow the full quota independently (readiness finding H2).
+    # Example: redis://redis:6379/0
+    REDIS_URL: str = ""
+
     # Observability
     LOG_LEVEL: str = "INFO"
     SENTRY_DSN: str = ""

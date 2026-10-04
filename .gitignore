@@ -41,3 +41,7 @@ __pycache__/
 
 # Scripts (keep for reference but don't track changes)
 create_issues.sh
+
+# Private keys — never commit (e.g. EC2 .pem)
+*.pem
+*.key
