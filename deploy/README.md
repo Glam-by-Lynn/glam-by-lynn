@@ -146,9 +146,21 @@ in front adds a hop and the value must rise to match — otherwise the limiter
 reads an address the caller controls, and rate limiting can be bypassed by
 rotating a header. If you move to an ALB, nginx becomes redundant.
 
-**Uploads.** Prefer `STORAGE_PROVIDER=s3`. The `local` provider writes to a
-Docker volume: it survives redeploys, but not instance replacement, and isn't
-shared between containers.
+**Uploads.** Storage is configured in the **database**, not the environment:
+the factory reads `storage_provider` and the provider credentials from
+`site_settings`, where the admin UI writes them with the secret encrypted. The
+`STORAGE_PROVIDER` / `CLOUDINARY_*` / `AWS_*` entries in `deploy/.env` exist
+only to bootstrap a new deployment, before there's a frontend or an admin
+account to do it through:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env \
+    run --rm api python -m app.db.configure_storage
+```
+
+Run that once; the database is the source of truth afterwards. Prefer
+`cloudinary` or `s3` — `local` writes to a Docker volume that survives a
+redeploy but not instance replacement, and isn't shared between containers.
 
 **Secrets.** `deploy/.env` is the only copy of production credentials on the
 box. It is gitignored; keep it `chmod 600`. Nothing secret is baked into the
