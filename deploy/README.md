@@ -68,19 +68,40 @@ chmod 600 deploy/.env        # it holds live credentials
 Set your domain in `deploy/nginx/conf.d/api.conf` — it appears three times
 (`server_name` twice, and the certificate paths).
 
-### Certificate, before nginx can start
+### Certificate
 
-nginx won't start without the certificate files, and certbot needs nginx to
-answer the ACME challenge. Break the cycle by issuing the certificate first,
-with certbot serving the challenge itself:
+The DNS record is proxied by Cloudflare, so Let's Encrypt can't be used: an
+HTTP-01 challenge is answered by Cloudflare and never reaches this box. Use a
+**Cloudflare Origin Certificate** instead — it lasts 15 years and needs no
+renewal job.
+
+In the Cloudflare dashboard: **SSL/TLS → Origin Server → Create Certificate**.
+Accept the defaults (covers `glambylynn.com` and `*.glambylynn.com`). Save the
+two blocks it shows onto the instance:
 
 ```bash
-docker run --rm -p 80:80 \
-  -v glam-by-lynn_certbot-conf:/etc/letsencrypt \
-  -v glam-by-lynn_certbot-www:/var/www/certbot \
-  certbot/certbot certonly --standalone \
-  -d api.glambylynn.com --email you@example.com --agree-tos --no-eff-email
+mkdir -p ~/glam-by-lynn/deploy/nginx/certs
+nano ~/glam-by-lynn/deploy/nginx/certs/origin.pem   # the certificate
+nano ~/glam-by-lynn/deploy/nginx/certs/origin.key   # the private key
+chmod 600 ~/glam-by-lynn/deploy/nginx/certs/origin.key
 ```
+
+Then set the zone's SSL/TLS mode to **Full (strict)**. "Flexible" leaves the
+Cloudflare→origin leg unencrypted, which defeats the purpose.
+
+Check you have the right certificate before installing it — the dashboard
+offers two very different things under Origin Server:
+
+```bash
+openssl x509 -in origin.pem -noout -ext extendedKeyUsage -ext subjectAltName
+```
+
+A **server** certificate says `TLS Web Server Authentication` and lists your
+hostnames. The *Authenticated Origin Pulls* certificate says `TLS Web Client
+Authentication` and carries no hostname at all — that one is Cloudflare's
+client certificate for locking the origin to Cloudflare, and nginx cannot serve
+it. See the commented `ssl_client_certificate` block in
+`deploy/nginx/conf.d/api.conf` for where it does belong.
 
 Then bring everything up:
 
@@ -161,6 +182,9 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env \
 Run that once; the database is the source of truth afterwards. Prefer
 `cloudinary` or `s3` — `local` writes to a Docker volume that survives a
 redeploy but not instance replacement, and isn't shared between containers.
+
+**Certificate renewal.** None needed — a Cloudflare Origin Certificate is
+valid for 15 years. Note the expiry somewhere you'll see it in 2036.
 
 **Secrets.** `deploy/.env` is the only copy of production credentials on the
 box. It is gitignored; keep it `chmod 600`. Nothing secret is baked into the

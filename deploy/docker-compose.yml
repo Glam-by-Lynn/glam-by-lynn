@@ -1,7 +1,9 @@
 # Production stack for a single EC2 instance.
 #
 # Three services: the API, Redis for shared rate-limit counters, and nginx
-# terminating TLS. PostgreSQL is deliberately absent — it lives in RDS, so the
+# terminating TLS with a Cloudflare Origin Certificate. No certbot — the DNS
+# record is proxied by Cloudflare, so an ACME challenge never reaches this
+# host. PostgreSQL is deliberately absent — it lives in RDS, so the
 # database survives the instance being replaced, and backups and patching are
 # AWS's problem rather than yours.
 #
@@ -78,27 +80,11 @@ services:
       - "443:443"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - certbot-conf:/etc/letsencrypt:ro
-      - certbot-www:/var/www/certbot:ro
+      # Cloudflare Origin Certificate — see deploy/nginx/conf.d/api.conf.
+      - ./nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - api
     logging: *json_logs
 
-  # Renewal runs in the background; nginx picks up new certificates on reload.
-  # The initial certificate is issued manually — see deploy/README.md.
-  certbot:
-    image: certbot/certbot:latest
-    restart: unless-stopped
-    volumes:
-      - certbot-conf:/etc/letsencrypt
-      - certbot-www:/var/www/certbot
-    entrypoint: >
-      sh -c 'trap exit TERM;
-      while :; do certbot renew --webroot -w /var/www/certbot --quiet;
-      sleep 12h & wait $${!}; done'
-    logging: *json_logs
-
 volumes:
   uploads:
-  certbot-conf:
-  certbot-www:

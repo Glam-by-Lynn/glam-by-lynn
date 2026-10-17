@@ -1,0 +1,3 @@
+# Certificates and keys are per-deployment; never commit them.
+*
+!.gitignore
