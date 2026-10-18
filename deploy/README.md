@@ -72,8 +72,10 @@ Set your domain in `deploy/nginx/conf.d/api.conf` — it appears three times
 
 The DNS record is proxied by Cloudflare, so Let's Encrypt can't be used: an
 HTTP-01 challenge is answered by Cloudflare and never reaches this box. Use a
-**Cloudflare Origin Certificate** instead — it lasts 15 years and needs no
-renewal job.
+**Cloudflare Origin Certificate** instead, which is valid while proxied and
+needs no ACME challenge. Pick the 15-year lifetime unless you have a reason
+not to — the dropdown also offers shorter ones, and a 1-year certificate is a
+renewal you have to remember.
 
 In the Cloudflare dashboard: **SSL/TLS → Origin Server → Create Certificate**.
 Accept the defaults (covers `glambylynn.com` and `*.glambylynn.com`). Save the
@@ -183,8 +185,21 @@ Run that once; the database is the source of truth afterwards. Prefer
 `cloudinary` or `s3` — `local` writes to a Docker volume that survives a
 redeploy but not instance replacement, and isn't shared between containers.
 
-**Certificate renewal.** None needed — a Cloudflare Origin Certificate is
-valid for 15 years. Note the expiry somewhere you'll see it in 2036.
+**Certificate renewal.** Cloudflare lets you choose the lifetime when creating
+an Origin Certificate, so check what yours actually says rather than assuming:
+
+```bash
+openssl x509 -in deploy/nginx/certs/origin.pem -noout -dates
+```
+
+The certificate currently installed expires **18 October 2027** — one year, not
+the 15-year maximum. Put a reminder in the calendar: nothing renews it
+automatically, and when it lapses Cloudflare returns 526 errors under Full
+(strict) while the origin itself looks perfectly healthy.
+
+Replacing it is: create a new certificate in the dashboard, overwrite
+`deploy/nginx/certs/origin.pem` and `.key`, then
+`docker compose -f deploy/docker-compose.yml restart nginx`.
 
 **Secrets.** `deploy/.env` is the only copy of production credentials on the
 box. It is gitignored; keep it `chmod 600`. Nothing secret is baked into the
