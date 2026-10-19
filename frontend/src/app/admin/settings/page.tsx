@@ -11,7 +11,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -22,9 +21,6 @@ import {
 } from "@/components/ui/select";
 import {
   Save,
-  Mail,
-  Phone,
-  MapPin,
   ToggleLeft,
   Loader2,
   HardDrive,
@@ -40,6 +36,19 @@ import { extractErrorMessage } from "@/lib/error-utils";
 import { API_BASE_URL, API_ENDPOINTS } from "@/config/api";
 import { useAuth } from "@/hooks/useAuth";
 
+/**
+ * What the API returns in place of a stored secret, and what it accepts back
+ * to mean "unchanged". Must match MASKED in
+ * backend/app/api/routes/admin/storage_settings.py.
+ */
+const MASKED_SECRET = "********";
+
+const STORAGE_PROVIDER_LABELS: Record<string, string> = {
+  local: "Local Storage",
+  s3: "Amazon S3",
+  cloudinary: "Cloudinary",
+};
+
 export default function AdminSettingsPage() {
   const { user, loading: authLoading, isAdmin } = useRequireAdmin();
   const { session } = useAuth();
@@ -48,6 +57,9 @@ export default function AdminSettingsPage() {
   const [saveSuccess, setSaveSuccess] = useState("");
   const [saveError, setSaveError] = useState("");
   const [settingsLoading, setSettingsLoading] = useState(true);
+  // Set when the saved settings could not be read at all, so the page can say
+  // "unknown" rather than present its initial state as the stored values.
+  const [settingsLoadError, setSettingsLoadError] = useState("");
 
   // Feature Toggles (persisted via API)
   const [featureToggles, setFeatureToggles] = useState({
@@ -60,16 +72,6 @@ export default function AdminSettingsPage() {
   const [whatsappSuccess, setWhatsappSuccess] = useState("");
   const [whatsappError, setWhatsappError] = useState("");
 
-  // Business Info
-  const [businessInfo, setBusinessInfo] = useState({
-    businessName: "Glam by Lynn",
-    description: "Premier makeup artistry and beauty services in Kitui and Nairobi, Kenya",
-    email: "contact@glambylynn.com",
-    phone: "+254 XXX XXX XXX",
-    whatsapp: "+254 XXX XXX XXX",
-    address: "Kitui & Nairobi, Kenya",
-  });
-
   // Social Media
   const [socialMedia, setSocialMedia] = useState({
     facebook: "",
@@ -77,17 +79,6 @@ export default function AdminSettingsPage() {
     twitter: "",
     tiktok: "",
     youtube: "",
-  });
-
-  // Business Hours
-  const [businessHours, setBusinessHours] = useState({
-    monday: { open: "09:00", close: "18:00", closed: false },
-    tuesday: { open: "09:00", close: "18:00", closed: false },
-    wednesday: { open: "09:00", close: "18:00", closed: false },
-    thursday: { open: "09:00", close: "18:00", closed: false },
-    friday: { open: "09:00", close: "18:00", closed: false },
-    saturday: { open: "09:00", close: "18:00", closed: false },
-    sunday: { open: "09:00", close: "18:00", closed: true },
   });
 
   // Payment Settings (shown to customers on the order confirmation page)
@@ -102,31 +93,46 @@ export default function AdminSettingsPage() {
     contactEmail: "",
   });
 
-  // Notification Settings
-  const [notificationSettings, setNotificationSettings] = useState({
-    emailNewOrder: true,
-    emailNewBooking: true,
-    emailLowStock: true,
-    emailCancellation: true,
-    notificationEmail: "admin@glambylynn.com",
-  });
-
   // Image Storage Settings
-  const [storageProvider, setStorageProvider] = useState<"local" | "s3" | "cloudinary">("local");
+  //
+  // `storageProvider` starts as null, not "local". It used to default to
+  // "local", which meant any failure to read the real configuration left the
+  // page confidently displaying "Local Storage" while Cloudinary was the
+  // provider actually in use — the select showed a default as though it were
+  // the stored value. Null renders nothing until we know, and
+  // `storageLoadError` explains why if we never find out.
+  type StorageProvider = "local" | "s3" | "cloudinary";
+  const [storageProvider, setStorageProvider] = useState<StorageProvider | null>(null);
+  // The provider in effect on the server, kept separate from the select so the
+  // admin can always see what is live even after changing the dropdown.
+  const [activeStorage, setActiveStorage] = useState<{
+    provider: StorageProvider;
+    detail: string;
+  } | null>(null);
+  const [storageLoadError, setStorageLoadError] = useState("");
   const [s3Config, setS3Config] = useState({
     bucket_name: "",
     access_key_id: "",
-    secret_access_key: "",
     region: "us-east-1",
   });
   const [cloudinaryConfig, setCloudinaryConfig] = useState({
     cloud_name: "",
     api_key: "",
-    api_secret: "",
   });
+  // Secrets are never read back — the API masks them. These track whether one
+  // is already stored, so the input can say so instead of showing "********"
+  // as if it were the value. Typed secrets live in their own state and are
+  // sent only when non-empty.
+  const [s3SecretStored, setS3SecretStored] = useState(false);
+  const [cloudinarySecretStored, setCloudinarySecretStored] = useState(false);
+  const [s3SecretInput, setS3SecretInput] = useState("");
+  const [cloudinarySecretInput, setCloudinarySecretInput] = useState("");
   const [storageSaving, setStorageSaving] = useState(false);
   const [storageTesting, setStorageTesting] = useState(false);
-  const [storageTestResult, setStorageTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [storageTestResult, setStorageTestResult] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
   const [storageSuccess, setStorageSuccess] = useState("");
   const [storageError, setStorageError] = useState("");
 
@@ -142,18 +148,34 @@ export default function AdminSettingsPage() {
   const [instagramSuccess, setInstagramSuccess] = useState("");
   const [instagramError, setInstagramError] = useState("");
 
-  // Fetch saved settings from API on mount
+  // Fetch saved settings from API on mount.
+  //
+  // Every field below shows a stored value, so a failed load has to say so.
+  // Silently leaving the initial state in place is what made this page claim
+  // storage was local when it was Cloudinary: an unset field and a field we
+  // failed to read look identical to the admin, and one of them invites
+  // re-entering a value that was already saved.
   useEffect(() => {
     async function loadSettings() {
       try {
         const token = (session as any)?.accessToken;
-        if (!token) return;
-        const response = await fetch(
-          `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_LIST}`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
-        );
+        if (!token) {
+          setSettingsLoadError(
+            "Your session has no API token, so saved settings could not be loaded. Sign out and back in."
+          );
+          setStorageLoadError(
+            "Could not read the storage configuration, so the provider in use is unknown."
+          );
+          return;
+        }
+        const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_LIST}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) {
+          setSettingsLoadError(
+            `Could not load saved settings (HTTP ${response.status}). The fields below may not reflect what is stored.`
+          );
+        }
         if (response.ok) {
           const data = await response.json();
           setFeatureToggles((prev) => ({
@@ -183,10 +205,9 @@ export default function AdminSettingsPage() {
         }
 
         // Load Instagram settings
-        const igRes = await fetch(
-          `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.INSTAGRAM_GET}`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
+        const igRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.INSTAGRAM_GET}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
         if (igRes.ok) {
           const igData = await igRes.json();
           setInstagramEnabled(igData.enabled ?? false);
@@ -196,32 +217,65 @@ export default function AdminSettingsPage() {
           setInstagramTokenExpires(igData.token_expires_at ?? null);
         }
 
-        // Load storage settings
-        const storageRes = await fetch(
-          `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.STORAGE_GET}`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
+        // Load storage settings.
+        //
+        // This endpoint requires super_admin while the page only requires
+        // admin, so a 403 here is an ordinary outcome rather than a bug — and
+        // it must not be mistaken for "storage is local".
+        const storageRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.STORAGE_GET}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
         if (storageRes.ok) {
           const storageData = await storageRes.json();
-          setStorageProvider(storageData.provider || "local");
+          const provider: StorageProvider = storageData.provider || "local";
+          setStorageProvider(provider);
+
           if (storageData.s3) {
             setS3Config({
               bucket_name: storageData.s3.bucket_name || "",
               access_key_id: storageData.s3.access_key_id || "",
-              secret_access_key: storageData.s3.secret_access_key || "",
               region: storageData.s3.region || "us-east-1",
             });
+            // The response masks the secret as "********"; its presence means
+            // one is stored, and it is never a value to put in the field.
+            setS3SecretStored(Boolean(storageData.s3.secret_access_key));
           }
           if (storageData.cloudinary) {
             setCloudinaryConfig({
               cloud_name: storageData.cloudinary.cloud_name || "",
               api_key: storageData.cloudinary.api_key || "",
-              api_secret: storageData.cloudinary.api_secret || "",
             });
+            setCloudinarySecretStored(Boolean(storageData.cloudinary.api_secret));
           }
+
+          setActiveStorage({
+            provider,
+            detail:
+              provider === "cloudinary"
+                ? storageData.cloudinary?.cloud_name
+                  ? `cloud: ${storageData.cloudinary.cloud_name}`
+                  : "no credentials stored"
+                : provider === "s3"
+                  ? storageData.s3?.bucket_name
+                    ? `bucket: ${storageData.s3.bucket_name}`
+                    : "no credentials stored"
+                  : "uploads are written to the server's own disk",
+          });
+        } else if (storageRes.status === 403) {
+          setStorageLoadError(
+            "Only a super admin can view or change storage settings, so the current configuration can't be shown here."
+          );
+        } else {
+          setStorageLoadError(
+            `Could not read the storage configuration (HTTP ${storageRes.status}), so the provider in use is unknown — reload to try again.`
+          );
         }
       } catch (err) {
         console.error("Failed to load settings:", err);
+        setSettingsLoadError(extractErrorMessage(err, "Could not reach the API to load settings"));
+        setStorageLoadError(
+          "Could not read the storage configuration, so the provider in use is unknown."
+        );
       } finally {
         setSettingsLoading(false);
       }
@@ -238,17 +292,14 @@ export default function AdminSettingsPage() {
 
     try {
       const token = (session as any)?.accessToken;
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_UPDATE}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(featureToggles),
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_UPDATE}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(featureToggles),
+      });
 
       if (!response.ok) {
         throw new Error("Failed to save settings");
@@ -271,26 +322,21 @@ export default function AdminSettingsPage() {
 
     const digits = whatsappPhone.replace(/\D/g, "");
     if (digits && (digits.length < 8 || digits.length > 15)) {
-      setWhatsappError(
-        "Enter a valid phone number with country code (8–15 digits, no '+')."
-      );
+      setWhatsappError("Enter a valid phone number with country code (8–15 digits, no '+').");
       setWhatsappSaving(false);
       return;
     }
 
     try {
       const token = (session as any)?.accessToken;
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_UPDATE}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ whatsapp_phone_number: digits }),
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_UPDATE}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ whatsapp_phone_number: digits }),
+      });
       if (!response.ok) throw new Error("Failed to save WhatsApp number");
       setWhatsappPhone(digits);
       setWhatsappSuccess("WhatsApp number saved");
@@ -302,25 +348,6 @@ export default function AdminSettingsPage() {
     }
   };
 
-  const handleSaveBusinessInfo = async () => {
-    setSaving(true);
-    setSaveError("");
-    setSaveSuccess("");
-
-    try {
-      // TODO: Implement API call to save business info
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      setSaveSuccess("Business information saved successfully");
-      setTimeout(() => setSaveSuccess(""), 3000);
-    } catch (err: any) {
-      console.error("Error saving business info:", err);
-      setSaveError(extractErrorMessage(err, "Failed to save business information"));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleSaveSocialMedia = async () => {
     setSaving(true);
     setSaveError("");
@@ -328,23 +355,20 @@ export default function AdminSettingsPage() {
 
     try {
       const token = (session as any)?.accessToken;
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_UPDATE}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            social_facebook: socialMedia.facebook,
-            social_instagram: socialMedia.instagram,
-            social_twitter: socialMedia.twitter,
-            social_tiktok: socialMedia.tiktok,
-            social_youtube: socialMedia.youtube,
-          }),
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_UPDATE}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          social_facebook: socialMedia.facebook,
+          social_instagram: socialMedia.instagram,
+          social_twitter: socialMedia.twitter,
+          social_tiktok: socialMedia.tiktok,
+          social_youtube: socialMedia.youtube,
+        }),
+      });
 
       if (!response.ok) {
         throw new Error("Failed to save social media links");
@@ -360,25 +384,6 @@ export default function AdminSettingsPage() {
     }
   };
 
-  const handleSaveBusinessHours = async () => {
-    setSaving(true);
-    setSaveError("");
-    setSaveSuccess("");
-
-    try {
-      // TODO: Implement API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      setSaveSuccess("Business hours saved successfully");
-      setTimeout(() => setSaveSuccess(""), 3000);
-    } catch (err: any) {
-      console.error("Error saving business hours:", err);
-      setSaveError(extractErrorMessage(err, "Failed to save business hours"));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleSavePaymentSettings = async () => {
     setSaving(true);
     setSaveError("");
@@ -386,26 +391,23 @@ export default function AdminSettingsPage() {
 
     try {
       const token = (session as any)?.accessToken;
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_UPDATE}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            payment_mpesa_paybill: paymentSettings.mpesaPaybill.trim(),
-            payment_bank_name: paymentSettings.bankName.trim(),
-            payment_bank_account_name: paymentSettings.bankAccountName.trim(),
-            payment_bank_account_number: paymentSettings.bankAccountNumber.trim(),
-            payment_confirmation_phone: paymentSettings.confirmationPhone.trim(),
-            payment_confirmation_email: paymentSettings.confirmationEmail.trim(),
-            contact_phone: paymentSettings.contactPhone.trim(),
-            contact_email: paymentSettings.contactEmail.trim(),
-          }),
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.ADMIN_UPDATE}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          payment_mpesa_paybill: paymentSettings.mpesaPaybill.trim(),
+          payment_bank_name: paymentSettings.bankName.trim(),
+          payment_bank_account_name: paymentSettings.bankAccountName.trim(),
+          payment_bank_account_number: paymentSettings.bankAccountNumber.trim(),
+          payment_confirmation_phone: paymentSettings.confirmationPhone.trim(),
+          payment_confirmation_email: paymentSettings.confirmationEmail.trim(),
+          contact_phone: paymentSettings.contactPhone.trim(),
+          contact_email: paymentSettings.contactEmail.trim(),
+        }),
+      });
 
       if (!response.ok) {
         throw new Error("Failed to save payment settings");
@@ -421,23 +423,38 @@ export default function AdminSettingsPage() {
     }
   };
 
-  const handleSaveNotifications = async () => {
-    setSaving(true);
-    setSaveError("");
-    setSaveSuccess("");
+  /**
+   * The request body for the storage test and save endpoints.
+   *
+   * The API masks stored secrets as "********" on read and treats that exact
+   * string on write as "leave the stored secret alone". So an untouched secret
+   * field must send the sentinel, never an empty string — sending "" would
+   * encrypt an empty secret and break uploads. Returns null when a secret is
+   * needed and neither stored nor typed.
+   */
+  const buildStorageBody = (): Record<string, unknown> | null => {
+    const body: Record<string, unknown> = { provider: storageProvider };
 
-    try {
-      // TODO: Implement API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      setSaveSuccess("Notification settings saved successfully");
-      setTimeout(() => setSaveSuccess(""), 3000);
-    } catch (err: any) {
-      console.error("Error saving notification settings:", err);
-      setSaveError(extractErrorMessage(err, "Failed to save notification settings"));
-    } finally {
-      setSaving(false);
+    if (storageProvider === "s3") {
+      if (!s3SecretInput && !s3SecretStored) {
+        setStorageError("Enter the S3 secret access key before saving or testing.");
+        return null;
+      }
+      body.s3 = { ...s3Config, secret_access_key: s3SecretInput || MASKED_SECRET };
     }
+
+    if (storageProvider === "cloudinary") {
+      if (!cloudinarySecretInput && !cloudinarySecretStored) {
+        setStorageError("Enter the Cloudinary API secret before saving or testing.");
+        return null;
+      }
+      body.cloudinary = {
+        ...cloudinaryConfig,
+        api_secret: cloudinarySecretInput || MASKED_SECRET,
+      };
+    }
+
+    return body;
   };
 
   const handleTestStorageConnection = async () => {
@@ -447,27 +464,26 @@ export default function AdminSettingsPage() {
 
     try {
       const token = (session as any)?.accessToken;
-      const body: any = { provider: storageProvider };
-      if (storageProvider === "s3") body.s3 = s3Config;
-      if (storageProvider === "cloudinary") body.cloudinary = cloudinaryConfig;
+      const body = buildStorageBody();
+      if (!body) return;
 
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.STORAGE_TEST}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(body),
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.STORAGE_TEST}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+      });
 
       if (!response.ok) throw new Error("Test request failed");
       const result = await response.json();
       setStorageTestResult(result);
     } catch (err: any) {
-      setStorageTestResult({ success: false, message: extractErrorMessage(err, "Connection test failed") });
+      setStorageTestResult({
+        success: false,
+        message: extractErrorMessage(err, "Connection test failed"),
+      });
     } finally {
       setStorageTesting(false);
     }
@@ -481,23 +497,40 @@ export default function AdminSettingsPage() {
 
     try {
       const token = (session as any)?.accessToken;
-      const body: any = { provider: storageProvider };
-      if (storageProvider === "s3") body.s3 = s3Config;
-      if (storageProvider === "cloudinary") body.cloudinary = cloudinaryConfig;
+      const body = buildStorageBody();
+      if (!body) return;
 
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.STORAGE_UPDATE}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(body),
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.STORAGE_UPDATE}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+      });
 
       if (!response.ok) throw new Error("Failed to save storage settings");
+
+      // The endpoint echoes back the stored configuration, so adopt it rather
+      // than assuming the save produced what was typed — this is what keeps
+      // "Currently in use" honest immediately after a change.
+      const saved = await response.json();
+      const savedProvider: StorageProvider = saved.provider || "local";
+      setStorageProvider(savedProvider);
+      setS3SecretStored(Boolean(saved.s3?.secret_access_key));
+      setCloudinarySecretStored(Boolean(saved.cloudinary?.api_secret));
+      setS3SecretInput("");
+      setCloudinarySecretInput("");
+      setStorageLoadError("");
+      setActiveStorage({
+        provider: savedProvider,
+        detail:
+          savedProvider === "cloudinary"
+            ? `cloud: ${saved.cloudinary?.cloud_name || "unknown"}`
+            : savedProvider === "s3"
+              ? `bucket: ${saved.s3?.bucket_name || "unknown"}`
+              : "uploads are written to the server's own disk",
+      });
 
       setStorageSuccess("Storage settings saved successfully");
       setTimeout(() => setStorageSuccess(""), 3000);
@@ -519,17 +552,14 @@ export default function AdminSettingsPage() {
       if (instagramUserId) body.user_id = instagramUserId;
       if (instagramAccessToken) body.access_token = instagramAccessToken;
 
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.INSTAGRAM_UPDATE}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(body),
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.INSTAGRAM_UPDATE}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+      });
 
       if (!response.ok) throw new Error("Failed to save Instagram settings");
 
@@ -552,13 +582,10 @@ export default function AdminSettingsPage() {
 
     try {
       const token = (session as any)?.accessToken;
-      const response = await fetch(
-        `${API_BASE_URL}${API_ENDPOINTS.SETTINGS.INSTAGRAM_SYNC}`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SETTINGS.INSTAGRAM_SYNC}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
       if (!response.ok) throw new Error("Sync failed");
 
@@ -597,13 +624,22 @@ export default function AdminSettingsPage() {
 
       {/* Success/Error Messages */}
       {saveSuccess && (
-        <div className="bg-green-50 border-l-4 border-green-500 text-green-700 p-4 rounded">
+        <div className="rounded border-l-4 border-green-500 bg-green-50 p-4 text-green-700">
           {saveSuccess}
         </div>
       )}
       {saveError && (
-        <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded">
+        <div className="rounded border-l-4 border-red-500 bg-red-50 p-4 text-red-700">
           {saveError}
+        </div>
+      )}
+
+      {/* A failed load has to be visible. Without this the page falls back to
+          its initial state and every field reads as a deliberate setting. */}
+      {!settingsLoading && settingsLoadError && (
+        <div className="flex items-start gap-2 rounded border-l-4 border-amber-500 bg-amber-50 p-4 text-amber-800">
+          <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+          <span>{settingsLoadError}</span>
         </div>
       )}
 
@@ -616,21 +652,19 @@ export default function AdminSettingsPage() {
               <ToggleLeft className="h-5 w-5" />
               Feature Toggles
             </CardTitle>
-            <CardDescription>
-              Enable or disable site features
-            </CardDescription>
+            <CardDescription>Enable or disable site features</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
             {settingsLoading ? (
               <div className="flex items-center justify-center py-4">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
               </div>
             ) : (
               <>
-                <div className="flex items-center justify-between p-4 border rounded-lg">
+                <div className="flex items-center justify-between rounded-lg border p-4">
                   <div>
                     <div className="font-medium">Newsletter Subscription</div>
-                    <div className="text-sm text-muted-foreground">
+                    <div className="text-muted-foreground text-sm">
                       Show newsletter signup on the homepage and footer
                     </div>
                   </div>
@@ -664,18 +698,18 @@ export default function AdminSettingsPage() {
               WhatsApp Ordering
             </CardTitle>
             <CardDescription>
-              Phone number used for the “Order/Book on WhatsApp” buttons. Stored
-              server-side and never exposed in the public site bundle.
+              Phone number used for the “Order/Book on WhatsApp” buttons. Stored server-side and
+              never exposed in the public site bundle.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {whatsappSuccess && (
-              <div className="bg-green-50 border-l-4 border-green-500 text-green-700 p-3 rounded text-sm">
+              <div className="rounded border-l-4 border-green-500 bg-green-50 p-3 text-sm text-green-700">
                 {whatsappSuccess}
               </div>
             )}
             {whatsappError && (
-              <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-3 rounded text-sm">
+              <div className="rounded border-l-4 border-red-500 bg-red-50 p-3 text-sm text-red-700">
                 {whatsappError}
               </div>
             )}
@@ -688,10 +722,10 @@ export default function AdminSettingsPage() {
                 onChange={(e) => setWhatsappPhone(e.target.value)}
                 placeholder="254712345678"
               />
-              <p className="text-xs text-muted-foreground">
+              <p className="text-muted-foreground text-xs">
                 Digits only, including country code, no leading “+”. Example:
-                <code className="ml-1 rounded bg-muted px-1 py-0.5">254712345678</code>.
-                Leave empty to disable WhatsApp ordering.
+                <code className="bg-muted ml-1 rounded px-1 py-0.5">254712345678</code>. Leave empty
+                to disable WhatsApp ordering.
               </p>
             </div>
             <div className="flex justify-end">
@@ -710,35 +744,63 @@ export default function AdminSettingsPage() {
               <HardDrive className="h-5 w-5" />
               Image Storage
             </CardTitle>
-            <CardDescription>
-              Configure where uploaded images are stored
-            </CardDescription>
+            <CardDescription>Configure where uploaded images are stored</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
             {settingsLoading ? (
               <div className="flex items-center justify-center py-4">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
               </div>
             ) : (
               <>
                 {/* Success / Error */}
                 {storageSuccess && (
-                  <div className="bg-green-50 border-l-4 border-green-500 text-green-700 p-3 rounded text-sm">
+                  <div className="rounded border-l-4 border-green-500 bg-green-50 p-3 text-sm text-green-700">
                     {storageSuccess}
                   </div>
                 )}
                 {storageError && (
-                  <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-3 rounded text-sm">
+                  <div className="rounded border-l-4 border-red-500 bg-red-50 p-3 text-sm text-red-700">
                     {storageError}
                   </div>
                 )}
 
+                {/* What is actually in use on the server. Shown separately
+                    from the select so changing the dropdown never changes
+                    what this reports. */}
+                {activeStorage && (
+                  <div className="bg-muted/50 flex items-start gap-2 rounded-lg border p-3 text-sm">
+                    <HardDrive className="text-muted-foreground mt-0.5 h-4 w-4 flex-shrink-0" />
+                    <span>
+                      Currently in use:{" "}
+                      <span className="font-medium">
+                        {STORAGE_PROVIDER_LABELS[activeStorage.provider]}
+                      </span>
+                      <span className="text-muted-foreground"> — {activeStorage.detail}</span>
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* The configuration could not be read. Deliberately renders no
+                provider select: showing one would mean showing a value we do
+                not have, which is the bug this replaced. */}
+            {!settingsLoading && storageLoadError && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                <span>{storageLoadError}</span>
+              </div>
+            )}
+
+            {!settingsLoading && !storageLoadError && storageProvider && (
+              <>
                 {/* Provider Select */}
                 <div className="space-y-2">
                   <Label>Storage Provider</Label>
                   <Select
                     value={storageProvider}
-                    onValueChange={(value: "local" | "s3" | "cloudinary") => {
+                    onValueChange={(value: StorageProvider) => {
                       setStorageProvider(value);
                       setStorageTestResult(null);
                     }}
@@ -747,7 +809,10 @@ export default function AdminSettingsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="local">Local Storage (default)</SelectItem>
+                      {/* Not labelled "(default)" any more: when the real
+                          provider failed to load, that word read as a
+                          statement about this site's configuration. */}
+                      <SelectItem value="local">Local Storage (server disk)</SelectItem>
                       <SelectItem value="s3">Amazon S3</SelectItem>
                       <SelectItem value="cloudinary">Cloudinary</SelectItem>
                     </SelectContent>
@@ -755,15 +820,18 @@ export default function AdminSettingsPage() {
                 </div>
 
                 {/* Warning Banner */}
-                <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
-                  <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                  <span>Switching providers does not migrate existing images. Old image URLs will continue to work as long as the files remain at their original location.</span>
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                  <span>
+                    Switching providers does not migrate existing images. Old image URLs will
+                    continue to work as long as the files remain at their original location.
+                  </span>
                 </div>
 
                 {/* S3 Config */}
                 {storageProvider === "s3" && (
-                  <div className="space-y-4 p-4 border rounded-lg">
-                    <h4 className="font-medium text-sm">Amazon S3 Configuration</h4>
+                  <div className="space-y-4 rounded-lg border p-4">
+                    <h4 className="text-sm font-medium">Amazon S3 Configuration</h4>
                     <div className="space-y-2">
                       <Label htmlFor="s3-bucket">Bucket Name</Label>
                       <Input
@@ -778,7 +846,9 @@ export default function AdminSettingsPage() {
                       <Input
                         id="s3-access-key"
                         value={s3Config.access_key_id}
-                        onChange={(e) => setS3Config({ ...s3Config, access_key_id: e.target.value })}
+                        onChange={(e) =>
+                          setS3Config({ ...s3Config, access_key_id: e.target.value })
+                        }
                         placeholder="AKIA..."
                       />
                     </div>
@@ -787,10 +857,19 @@ export default function AdminSettingsPage() {
                       <Input
                         id="s3-secret"
                         type="password"
-                        value={s3Config.secret_access_key}
-                        onChange={(e) => setS3Config({ ...s3Config, secret_access_key: e.target.value })}
-                        placeholder="Enter secret access key"
+                        value={s3SecretInput}
+                        onChange={(e) => setS3SecretInput(e.target.value)}
+                        placeholder={
+                          s3SecretStored
+                            ? "Stored — leave blank to keep it"
+                            : "Enter secret access key"
+                        }
                       />
+                      <p className="text-muted-foreground text-xs">
+                        {s3SecretStored
+                          ? "A secret is saved and encrypted. Leave this blank to keep it, or type a new one to replace it."
+                          : "No secret is saved yet."}
+                      </p>
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="s3-region">Region</Label>
@@ -806,14 +885,16 @@ export default function AdminSettingsPage() {
 
                 {/* Cloudinary Config */}
                 {storageProvider === "cloudinary" && (
-                  <div className="space-y-4 p-4 border rounded-lg">
-                    <h4 className="font-medium text-sm">Cloudinary Configuration</h4>
+                  <div className="space-y-4 rounded-lg border p-4">
+                    <h4 className="text-sm font-medium">Cloudinary Configuration</h4>
                     <div className="space-y-2">
                       <Label htmlFor="cloudinary-cloud">Cloud Name</Label>
                       <Input
                         id="cloudinary-cloud"
                         value={cloudinaryConfig.cloud_name}
-                        onChange={(e) => setCloudinaryConfig({ ...cloudinaryConfig, cloud_name: e.target.value })}
+                        onChange={(e) =>
+                          setCloudinaryConfig({ ...cloudinaryConfig, cloud_name: e.target.value })
+                        }
                         placeholder="my-cloud"
                       />
                     </div>
@@ -822,7 +903,9 @@ export default function AdminSettingsPage() {
                       <Input
                         id="cloudinary-key"
                         value={cloudinaryConfig.api_key}
-                        onChange={(e) => setCloudinaryConfig({ ...cloudinaryConfig, api_key: e.target.value })}
+                        onChange={(e) =>
+                          setCloudinaryConfig({ ...cloudinaryConfig, api_key: e.target.value })
+                        }
                         placeholder="123456789"
                       />
                     </div>
@@ -831,10 +914,19 @@ export default function AdminSettingsPage() {
                       <Input
                         id="cloudinary-secret"
                         type="password"
-                        value={cloudinaryConfig.api_secret}
-                        onChange={(e) => setCloudinaryConfig({ ...cloudinaryConfig, api_secret: e.target.value })}
-                        placeholder="Enter API secret"
+                        value={cloudinarySecretInput}
+                        onChange={(e) => setCloudinarySecretInput(e.target.value)}
+                        placeholder={
+                          cloudinarySecretStored
+                            ? "Stored — leave blank to keep it"
+                            : "Enter API secret"
+                        }
                       />
+                      <p className="text-muted-foreground text-xs">
+                        {cloudinarySecretStored
+                          ? "A secret is saved and encrypted. Leave this blank to keep it, or type a new one to replace it."
+                          : "No secret is saved yet."}
+                      </p>
                     </div>
                   </div>
                 )}
@@ -842,16 +934,16 @@ export default function AdminSettingsPage() {
                 {/* Test Connection Result */}
                 {storageTestResult && (
                   <div
-                    className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
+                    className={`flex items-start gap-2 rounded-lg p-3 text-sm ${
                       storageTestResult.success
-                        ? "bg-green-50 border border-green-200 text-green-800"
-                        : "bg-red-50 border border-red-200 text-red-800"
+                        ? "border border-green-200 bg-green-50 text-green-800"
+                        : "border border-red-200 bg-red-50 text-red-800"
                     }`}
                   >
                     {storageTestResult.success ? (
-                      <CheckCircle2 className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0" />
                     ) : (
-                      <XCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                      <XCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
                     )}
                     <span>{storageTestResult.message}</span>
                   </div>
@@ -864,12 +956,13 @@ export default function AdminSettingsPage() {
                     onClick={handleTestStorageConnection}
                     disabled={storageTesting || storageSaving}
                   >
-                    {storageTesting ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : null}
+                    {storageTesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                     {storageTesting ? "Testing..." : "Test Connection"}
                   </Button>
-                  <Button onClick={handleSaveStorageSettings} disabled={storageSaving || storageTesting}>
+                  <Button
+                    onClick={handleSaveStorageSettings}
+                    disabled={storageSaving || storageTesting}
+                  >
                     <Save className="mr-2 h-4 w-4" />
                     {storageSaving ? "Saving..." : "Save Changes"}
                   </Button>
@@ -893,38 +986,35 @@ export default function AdminSettingsPage() {
           <CardContent className="space-y-6">
             {settingsLoading ? (
               <div className="flex items-center justify-center py-4">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
               </div>
             ) : (
               <>
                 {instagramSuccess && (
-                  <div className="bg-green-50 border-l-4 border-green-500 text-green-700 p-3 rounded text-sm">
+                  <div className="rounded border-l-4 border-green-500 bg-green-50 p-3 text-sm text-green-700">
                     {instagramSuccess}
                   </div>
                 )}
                 {instagramError && (
-                  <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-3 rounded text-sm">
+                  <div className="rounded border-l-4 border-red-500 bg-red-50 p-3 text-sm text-red-700">
                     {instagramError}
                   </div>
                 )}
 
                 {/* Enable/Disable Toggle */}
-                <div className="flex items-center justify-between p-4 border rounded-lg">
+                <div className="flex items-center justify-between rounded-lg border p-4">
                   <div>
                     <div className="font-medium">Enable Instagram Sync</div>
-                    <div className="text-sm text-muted-foreground">
+                    <div className="text-muted-foreground text-sm">
                       Automatically sync Instagram posts to the gallery
                     </div>
                   </div>
-                  <Switch
-                    checked={instagramEnabled}
-                    onCheckedChange={setInstagramEnabled}
-                  />
+                  <Switch checked={instagramEnabled} onCheckedChange={setInstagramEnabled} />
                 </div>
 
                 {/* Configuration Fields */}
-                <div className="space-y-4 p-4 border rounded-lg">
-                  <h4 className="font-medium text-sm">Instagram API Configuration</h4>
+                <div className="space-y-4 rounded-lg border p-4">
+                  <h4 className="text-sm font-medium">Instagram API Configuration</h4>
                   <div className="space-y-2">
                     <Label htmlFor="instagram-user-id">Instagram User ID</Label>
                     <Input
@@ -933,7 +1023,7 @@ export default function AdminSettingsPage() {
                       onChange={(e) => setInstagramUserId(e.target.value)}
                       placeholder="17841400123456789"
                     />
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-muted-foreground text-xs">
                       Your Instagram Business or Creator account numeric ID
                     </p>
                   </div>
@@ -944,15 +1034,19 @@ export default function AdminSettingsPage() {
                       type="password"
                       value={instagramAccessToken}
                       onChange={(e) => setInstagramAccessToken(e.target.value)}
-                      placeholder={instagramTokenSet ? "Token is set (enter new value to update)" : "Enter long-lived access token"}
+                      placeholder={
+                        instagramTokenSet
+                          ? "Token is set (enter new value to update)"
+                          : "Enter long-lived access token"
+                      }
                     />
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-muted-foreground text-xs">
                       Generate a long-lived token from the{" "}
                       <a
                         href="https://developers.facebook.com/tools/explorer/"
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-secondary underline inline-flex items-center gap-1"
+                        className="text-secondary inline-flex items-center gap-1 underline"
                       >
                         Facebook Graph API Explorer
                         <ExternalLink className="h-3 w-3" />
@@ -964,7 +1058,7 @@ export default function AdminSettingsPage() {
 
                 {/* Status Info */}
                 {(instagramLastSync || instagramTokenExpires) && (
-                  <div className="space-y-2 p-4 bg-muted/50 rounded-lg text-sm">
+                  <div className="bg-muted/50 space-y-2 rounded-lg p-4 text-sm">
                     {instagramLastSync && (
                       <div className="flex items-center justify-between">
                         <span className="text-muted-foreground">Last Sync</span>
@@ -974,13 +1068,17 @@ export default function AdminSettingsPage() {
                     {instagramTokenExpires && (
                       <div className="flex items-center justify-between">
                         <span className="text-muted-foreground">Token Expires</span>
-                        <span className={
-                          new Date(instagramTokenExpires) < new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-                            ? "text-amber-600 font-medium"
-                            : ""
-                        }>
+                        <span
+                          className={
+                            new Date(instagramTokenExpires) <
+                            new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+                              ? "font-medium text-amber-600"
+                              : ""
+                          }
+                        >
                           {new Date(instagramTokenExpires).toLocaleDateString()}
-                          {new Date(instagramTokenExpires) < new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) && (
+                          {new Date(instagramTokenExpires) <
+                            new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) && (
                             <span className="ml-1">(expiring soon)</span>
                           )}
                         </span>
@@ -1003,7 +1101,10 @@ export default function AdminSettingsPage() {
                     )}
                     {instagramSyncing ? "Syncing..." : "Sync Now"}
                   </Button>
-                  <Button onClick={handleSaveInstagramSettings} disabled={instagramSaving || instagramSyncing}>
+                  <Button
+                    onClick={handleSaveInstagramSettings}
+                    disabled={instagramSaving || instagramSyncing}
+                  >
                     <Save className="mr-2 h-4 w-4" />
                     {instagramSaving ? "Saving..." : "Save Changes"}
                   </Button>
@@ -1013,225 +1114,86 @@ export default function AdminSettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Business Info Section */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Business Information</CardTitle>
-            <CardDescription>
-              Update your business details and contact information
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="business-name">Business Name</Label>
-              <Input
-                id="business-name"
-                value={businessInfo.businessName}
-                onChange={(e) => setBusinessInfo({ ...businessInfo, businessName: e.target.value })}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="business-description">Description</Label>
-              <Textarea
-                id="business-description"
-                value={businessInfo.description}
-                onChange={(e) => setBusinessInfo({ ...businessInfo, description: e.target.value })}
-                rows={3}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="business-email">
-                  <Mail className="h-4 w-4" />
-                  Email
-                </Label>
-                <Input
-                  id="business-email"
-                  type="email"
-                  value={businessInfo.email}
-                  onChange={(e) => setBusinessInfo({ ...businessInfo, email: e.target.value })}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="business-phone">
-                  <Phone className="h-4 w-4" />
-                  Phone
-                </Label>
-                <Input
-                  id="business-phone"
-                  type="tel"
-                  value={businessInfo.phone}
-                  onChange={(e) => setBusinessInfo({ ...businessInfo, phone: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="business-whatsapp">WhatsApp</Label>
-                <Input
-                  id="business-whatsapp"
-                  type="tel"
-                  value={businessInfo.whatsapp}
-                  onChange={(e) => setBusinessInfo({ ...businessInfo, whatsapp: e.target.value })}
-                  placeholder="+254 XXX XXX XXX"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="business-address">
-                  <MapPin className="h-4 w-4" />
-                  Address
-                </Label>
-                <Input
-                  id="business-address"
-                  value={businessInfo.address}
-                  onChange={(e) => setBusinessInfo({ ...businessInfo, address: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div className="flex justify-end">
-              <Button onClick={handleSaveBusinessInfo} disabled={saving}>
-                <Save className="mr-2 h-4 w-4" />
-                {saving ? "Saving..." : "Save Changes"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
         {/* Social Media Section */}
         <Card>
           <CardHeader>
             <CardTitle>Social Media Links</CardTitle>
-            <CardDescription>
-              Add your social media profiles
-            </CardDescription>
+            <CardDescription>Add your social media profiles</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="social-facebook">Facebook</Label>
-              <Input
-                id="social-facebook"
-                type="url"
-                value={socialMedia.facebook}
-                onChange={(e) => setSocialMedia({ ...socialMedia, facebook: e.target.value })}
-                placeholder="https://facebook.com/glambylynn"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="social-instagram">Instagram</Label>
-              <Input
-                id="social-instagram"
-                type="url"
-                value={socialMedia.instagram}
-                onChange={(e) => setSocialMedia({ ...socialMedia, instagram: e.target.value })}
-                placeholder="https://instagram.com/glambylynn"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="social-twitter">Twitter</Label>
-              <Input
-                id="social-twitter"
-                type="url"
-                value={socialMedia.twitter}
-                onChange={(e) => setSocialMedia({ ...socialMedia, twitter: e.target.value })}
-                placeholder="https://twitter.com/glambylynn"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="social-tiktok">TikTok</Label>
-              <Input
-                id="social-tiktok"
-                type="url"
-                value={socialMedia.tiktok}
-                onChange={(e) => setSocialMedia({ ...socialMedia, tiktok: e.target.value })}
-                placeholder="https://tiktok.com/@glambylynn"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="social-youtube">YouTube</Label>
-              <Input
-                id="social-youtube"
-                type="url"
-                value={socialMedia.youtube}
-                onChange={(e) => setSocialMedia({ ...socialMedia, youtube: e.target.value })}
-                placeholder="https://youtube.com/@glambylynn"
-              />
-            </div>
-
-            <div className="flex justify-end">
-              <Button onClick={handleSaveSocialMedia} disabled={saving}>
-                <Save className="mr-2 h-4 w-4" />
-                {saving ? "Saving..." : "Save Changes"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Business Hours Section */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Business Hours</CardTitle>
-            <CardDescription>
-              Set your operating hours for each day of the week
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            {Object.entries(businessHours).map(([day, hours]) => (
-              <div key={day} className="flex items-center gap-4 border-b pb-4 last:border-0 last:pb-0">
-                <div className="w-24">
-                  <span className="font-medium capitalize">{day}</span>
-                </div>
-                <div className="flex items-center gap-4 flex-1">
-                  <Input
-                    type="time"
-                    value={hours.open}
-                    onChange={(e) => setBusinessHours({
-                      ...businessHours,
-                      [day]: { ...hours, open: e.target.value }
-                    })}
-                    disabled={hours.closed}
-                    className="w-auto"
-                  />
-                  <span className="text-sm text-muted-foreground">to</span>
-                  <Input
-                    type="time"
-                    value={hours.close}
-                    onChange={(e) => setBusinessHours({
-                      ...businessHours,
-                      [day]: { ...hours, close: e.target.value }
-                    })}
-                    disabled={hours.closed}
-                    className="w-auto"
-                  />
-                  <div className="flex items-center gap-2">
-                    <Switch
-                      checked={hours.closed}
-                      onCheckedChange={(checked) => setBusinessHours({
-                        ...businessHours,
-                        [day]: { ...hours, closed: checked }
-                      })}
-                    />
-                    <Label className="text-sm font-normal">Closed</Label>
-                  </div>
-                </div>
+            {/* Gated on the load like the cards above. These inputs start
+                empty, so rendering them before the fetch resolves showed
+                "nothing is set" for links that are set — and anything typed
+                in that window was overwritten when the fetch landed. */}
+            {settingsLoading ? (
+              <div className="flex items-center justify-center py-4">
+                <Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
               </div>
-            ))}
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="social-facebook">Facebook</Label>
+                  <Input
+                    id="social-facebook"
+                    type="url"
+                    value={socialMedia.facebook}
+                    onChange={(e) => setSocialMedia({ ...socialMedia, facebook: e.target.value })}
+                    placeholder="https://facebook.com/glambylynn"
+                  />
+                </div>
 
-            <div className="flex justify-end">
-              <Button onClick={handleSaveBusinessHours} disabled={saving}>
-                <Save className="mr-2 h-4 w-4" />
-                {saving ? "Saving..." : "Save Changes"}
-              </Button>
-            </div>
+                <div className="space-y-2">
+                  <Label htmlFor="social-instagram">Instagram</Label>
+                  <Input
+                    id="social-instagram"
+                    type="url"
+                    value={socialMedia.instagram}
+                    onChange={(e) => setSocialMedia({ ...socialMedia, instagram: e.target.value })}
+                    placeholder="https://instagram.com/glambylynn"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="social-twitter">Twitter</Label>
+                  <Input
+                    id="social-twitter"
+                    type="url"
+                    value={socialMedia.twitter}
+                    onChange={(e) => setSocialMedia({ ...socialMedia, twitter: e.target.value })}
+                    placeholder="https://twitter.com/glambylynn"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="social-tiktok">TikTok</Label>
+                  <Input
+                    id="social-tiktok"
+                    type="url"
+                    value={socialMedia.tiktok}
+                    onChange={(e) => setSocialMedia({ ...socialMedia, tiktok: e.target.value })}
+                    placeholder="https://tiktok.com/@glambylynn"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="social-youtube">YouTube</Label>
+                  <Input
+                    id="social-youtube"
+                    type="url"
+                    value={socialMedia.youtube}
+                    onChange={(e) => setSocialMedia({ ...socialMedia, youtube: e.target.value })}
+                    placeholder="https://youtube.com/@glambylynn"
+                  />
+                </div>
+
+                <div className="flex justify-end">
+                  <Button onClick={handleSaveSocialMedia} disabled={saving}>
+                    <Save className="mr-2 h-4 w-4" />
+                    {saving ? "Saving..." : "Save Changes"}
+                  </Button>
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
 
@@ -1240,197 +1202,154 @@ export default function AdminSettingsPage() {
           <CardHeader>
             <CardTitle>Payment & Contact Details</CardTitle>
             <CardDescription>
-              Shown to customers on the order confirmation page. Leave a field
-              blank to hide it.
+              Shown to customers on the order confirmation page. Leave a field blank to hide it.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="mpesa-paybill">M-Pesa Paybill / Business Number</Label>
-              <Input
-                id="mpesa-paybill"
-                value={paymentSettings.mpesaPaybill}
-                onChange={(e) => setPaymentSettings({ ...paymentSettings, mpesaPaybill: e.target.value })}
-                placeholder="e.g. 247247"
-              />
-              <p className="text-sm text-muted-foreground">
-                Customers use their order number as the account number.
-              </p>
-            </div>
-
-            <div className="space-y-4 rounded-lg border p-4">
-              <div className="font-medium">Bank Transfer</div>
-              <div className="grid gap-4 sm:grid-cols-2">
+            {settingsLoading ? (
+              <div className="flex items-center justify-center py-4">
+                <Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
+              </div>
+            ) : (
+              <>
                 <div className="space-y-2">
-                  <Label htmlFor="bank-name">Bank Name</Label>
+                  <Label htmlFor="mpesa-paybill">M-Pesa Paybill / Business Number</Label>
                   <Input
-                    id="bank-name"
-                    value={paymentSettings.bankName}
-                    onChange={(e) => setPaymentSettings({ ...paymentSettings, bankName: e.target.value })}
-                    placeholder="e.g. Equity Bank"
+                    id="mpesa-paybill"
+                    value={paymentSettings.mpesaPaybill}
+                    onChange={(e) =>
+                      setPaymentSettings({ ...paymentSettings, mpesaPaybill: e.target.value })
+                    }
+                    placeholder="e.g. 247247"
                   />
+                  <p className="text-muted-foreground text-sm">
+                    Customers use their order number as the account number.
+                  </p>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="bank-account-name">Account Name</Label>
-                  <Input
-                    id="bank-account-name"
-                    value={paymentSettings.bankAccountName}
-                    onChange={(e) => setPaymentSettings({ ...paymentSettings, bankAccountName: e.target.value })}
-                    placeholder="e.g. Glam by Lynn"
-                  />
-                </div>
-                <div className="space-y-2 sm:col-span-2">
-                  <Label htmlFor="bank-account-number">Account Number</Label>
-                  <Input
-                    id="bank-account-number"
-                    value={paymentSettings.bankAccountNumber}
-                    onChange={(e) => setPaymentSettings({ ...paymentSettings, bankAccountNumber: e.target.value })}
-                    placeholder="Bank account number"
-                  />
-                </div>
-              </div>
-            </div>
 
-            <div className="space-y-4 rounded-lg border p-4">
-              <div className="font-medium">Payment Confirmation</div>
-              <p className="text-sm text-muted-foreground">
-                Where customers send proof of payment.
-              </p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="confirmation-phone">WhatsApp / Phone</Label>
-                  <Input
-                    id="confirmation-phone"
-                    value={paymentSettings.confirmationPhone}
-                    onChange={(e) => setPaymentSettings({ ...paymentSettings, confirmationPhone: e.target.value })}
-                    placeholder="+254 7XX XXX XXX"
-                  />
+                <div className="space-y-4 rounded-lg border p-4">
+                  <div className="font-medium">Bank Transfer</div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="bank-name">Bank Name</Label>
+                      <Input
+                        id="bank-name"
+                        value={paymentSettings.bankName}
+                        onChange={(e) =>
+                          setPaymentSettings({ ...paymentSettings, bankName: e.target.value })
+                        }
+                        placeholder="e.g. Equity Bank"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="bank-account-name">Account Name</Label>
+                      <Input
+                        id="bank-account-name"
+                        value={paymentSettings.bankAccountName}
+                        onChange={(e) =>
+                          setPaymentSettings({
+                            ...paymentSettings,
+                            bankAccountName: e.target.value,
+                          })
+                        }
+                        placeholder="e.g. Glam by Lynn"
+                      />
+                    </div>
+                    <div className="space-y-2 sm:col-span-2">
+                      <Label htmlFor="bank-account-number">Account Number</Label>
+                      <Input
+                        id="bank-account-number"
+                        value={paymentSettings.bankAccountNumber}
+                        onChange={(e) =>
+                          setPaymentSettings({
+                            ...paymentSettings,
+                            bankAccountNumber: e.target.value,
+                          })
+                        }
+                        placeholder="Bank account number"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="confirmation-email">Email</Label>
-                  <Input
-                    id="confirmation-email"
-                    type="email"
-                    value={paymentSettings.confirmationEmail}
-                    onChange={(e) => setPaymentSettings({ ...paymentSettings, confirmationEmail: e.target.value })}
-                    placeholder="payments@example.com"
-                  />
+
+                <div className="space-y-4 rounded-lg border p-4">
+                  <div className="font-medium">Payment Confirmation</div>
+                  <p className="text-muted-foreground text-sm">
+                    Where customers send proof of payment.
+                  </p>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="confirmation-phone">WhatsApp / Phone</Label>
+                      <Input
+                        id="confirmation-phone"
+                        value={paymentSettings.confirmationPhone}
+                        onChange={(e) =>
+                          setPaymentSettings({
+                            ...paymentSettings,
+                            confirmationPhone: e.target.value,
+                          })
+                        }
+                        placeholder="+254 7XX XXX XXX"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="confirmation-email">Email</Label>
+                      <Input
+                        id="confirmation-email"
+                        type="email"
+                        value={paymentSettings.confirmationEmail}
+                        onChange={(e) =>
+                          setPaymentSettings({
+                            ...paymentSettings,
+                            confirmationEmail: e.target.value,
+                          })
+                        }
+                        placeholder="payments@example.com"
+                      />
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
 
-            <div className="space-y-4 rounded-lg border p-4">
-              <div className="font-medium">Customer Support Contact</div>
-              <p className="text-sm text-muted-foreground">
-                Shown under &quot;Need Help?&quot; on the confirmation page.
-              </p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="contact-phone">Phone / WhatsApp</Label>
-                  <Input
-                    id="contact-phone"
-                    value={paymentSettings.contactPhone}
-                    onChange={(e) => setPaymentSettings({ ...paymentSettings, contactPhone: e.target.value })}
-                    placeholder="+254 7XX XXX XXX"
-                  />
+                <div className="space-y-4 rounded-lg border p-4">
+                  <div className="font-medium">Customer Support Contact</div>
+                  <p className="text-muted-foreground text-sm">
+                    Shown under &quot;Need Help?&quot; on the confirmation page.
+                  </p>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="contact-phone">Phone / WhatsApp</Label>
+                      <Input
+                        id="contact-phone"
+                        value={paymentSettings.contactPhone}
+                        onChange={(e) =>
+                          setPaymentSettings({ ...paymentSettings, contactPhone: e.target.value })
+                        }
+                        placeholder="+254 7XX XXX XXX"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="contact-email">Email</Label>
+                      <Input
+                        id="contact-email"
+                        type="email"
+                        value={paymentSettings.contactEmail}
+                        onChange={(e) =>
+                          setPaymentSettings({ ...paymentSettings, contactEmail: e.target.value })
+                        }
+                        placeholder="info@example.com"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="contact-email">Email</Label>
-                  <Input
-                    id="contact-email"
-                    type="email"
-                    value={paymentSettings.contactEmail}
-                    onChange={(e) => setPaymentSettings({ ...paymentSettings, contactEmail: e.target.value })}
-                    placeholder="info@example.com"
-                  />
+
+                <div className="flex justify-end">
+                  <Button onClick={handleSavePaymentSettings} disabled={saving}>
+                    <Save className="mr-2 h-4 w-4" />
+                    {saving ? "Saving..." : "Save Changes"}
+                  </Button>
                 </div>
-              </div>
-            </div>
-
-            <div className="flex justify-end">
-              <Button onClick={handleSavePaymentSettings} disabled={saving}>
-                <Save className="mr-2 h-4 w-4" />
-                {saving ? "Saving..." : "Save Changes"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Notifications Section */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Email Notifications</CardTitle>
-            <CardDescription>
-              Configure which email notifications you want to receive
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="notification-email">Notification Email</Label>
-              <Input
-                id="notification-email"
-                type="email"
-                value={notificationSettings.notificationEmail}
-                onChange={(e) => setNotificationSettings({ ...notificationSettings, notificationEmail: e.target.value })}
-                placeholder="admin@glambylynn.com"
-              />
-              <p className="text-sm text-muted-foreground">
-                All admin notifications will be sent to this email
-              </p>
-            </div>
-
-            <div className="space-y-4">
-              <div className="flex items-center justify-between p-4 border rounded-lg">
-                <div>
-                  <div className="font-medium">New Order Notifications</div>
-                  <div className="text-sm text-muted-foreground">Get notified when a new order is placed</div>
-                </div>
-                <Switch
-                  checked={notificationSettings.emailNewOrder}
-                  onCheckedChange={(checked) => setNotificationSettings({ ...notificationSettings, emailNewOrder: checked })}
-                />
-              </div>
-
-              <div className="flex items-center justify-between p-4 border rounded-lg">
-                <div>
-                  <div className="font-medium">New Booking Notifications</div>
-                  <div className="text-sm text-muted-foreground">Get notified when a new booking is made</div>
-                </div>
-                <Switch
-                  checked={notificationSettings.emailNewBooking}
-                  onCheckedChange={(checked) => setNotificationSettings({ ...notificationSettings, emailNewBooking: checked })}
-                />
-              </div>
-
-              <div className="flex items-center justify-between p-4 border rounded-lg">
-                <div>
-                  <div className="font-medium">Low Stock Alerts</div>
-                  <div className="text-sm text-muted-foreground">Get notified when products are low in stock</div>
-                </div>
-                <Switch
-                  checked={notificationSettings.emailLowStock}
-                  onCheckedChange={(checked) => setNotificationSettings({ ...notificationSettings, emailLowStock: checked })}
-                />
-              </div>
-
-              <div className="flex items-center justify-between p-4 border rounded-lg">
-                <div>
-                  <div className="font-medium">Cancellation Notifications</div>
-                  <div className="text-sm text-muted-foreground">Get notified when orders or bookings are cancelled</div>
-                </div>
-                <Switch
-                  checked={notificationSettings.emailCancellation}
-                  onCheckedChange={(checked) => setNotificationSettings({ ...notificationSettings, emailCancellation: checked })}
-                />
-              </div>
-            </div>
-
-            <div className="flex justify-end">
-              <Button onClick={handleSaveNotifications} disabled={saving}>
-                <Save className="mr-2 h-4 w-4" />
-                {saving ? "Saving..." : "Save Changes"}
-              </Button>
-            </div>
+              </>
+            )}
           </CardContent>
         </Card>
       </div>
