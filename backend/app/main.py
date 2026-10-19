@@ -50,14 +50,29 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
 )
 
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- Middleware -------------------------------------------------------------
+#
+# ORDER MATTERS, AND IT IS INVERTED. `add_middleware` *prepends*, so the layer
+# registered LAST is the OUTERMOST one, and a middleware that returns a
+# response itself short-circuits everything registered before it.
+#
+# Request-ID is registered first here so it ends up innermost-but-one, and CORS
+# last so it ends up outermost. CORS has to be outermost: when the rate limiter
+# returns its own 429, that response never passes back through anything
+# registered earlier, so with CORS on the inside a 429 carried no
+# Access-Control-Allow-Origin header. The browser then reports a rate limit as
+# "blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present"
+# and fetch() rejects with "Failed to fetch" — which sends you looking at
+# ALLOWED_ORIGINS for a problem that was never there. Observed in production on
+# the admin settings page.
+#
+# Effective order, outermost → innermost:
+#   CORS → auth rate limit → general rate limit → security headers → request id
+
+# Request correlation id. No longer the outermost layer, so a CORS preflight
+# that CORSMiddleware answers by itself gets no id — it also never reaches
+# application code, so there is nothing to correlate it with.
+app.add_middleware(RequestIDMiddleware)
 
 # Add security headers
 app.add_middleware(SecurityHeadersMiddleware)
@@ -72,9 +87,15 @@ app.add_middleware(
 # Add stricter rate limiting for auth endpoints
 app.add_middleware(AuthRateLimitMiddleware)
 
-# Request-ID middleware is added last so it is the outermost layer — every
-# request (and its logs) carries a correlation id from the very start.
-app.add_middleware(RequestIDMiddleware)
+# Configure CORS. Registered last, so it wraps every layer above and its
+# headers are present on their short-circuit responses too (see the note).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(Exception)
